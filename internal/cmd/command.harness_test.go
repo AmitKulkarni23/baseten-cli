@@ -50,6 +50,30 @@ func (fakeHarnessExecer) Exec(command *exec.Cmd) error {
 	return err
 }
 
+// versionedHarnessExecer finds only the listed binaries, each printing its
+// own --version output. Bare names resolve under /fake, as on PATH.
+type versionedHarnessExecer map[string]string
+
+func (e versionedHarnessExecer) LookPath(name string) (string, error) {
+	if _, ok := e[name]; !ok {
+		return "", exec.ErrNotFound
+	}
+	if filepath.IsAbs(name) {
+		return name, nil
+	}
+	return "/fake/" + name, nil
+}
+
+func (e versionedHarnessExecer) Exec(command *exec.Cmd) error {
+	for name, version := range e {
+		if command.Path == name || command.Path == "/fake/"+name {
+			_, err := fmt.Fprintln(command.Stdout, version)
+			return err
+		}
+	}
+	return errors.New("unknown harness executed")
+}
+
 type missingHarnessExecer struct{}
 
 func (missingHarnessExecer) LookPath(string) (string, error) { return "", exec.ErrNotFound }
@@ -346,6 +370,92 @@ func Test_Harness_Setup_NotInstalledFailsBeforeAPI(t *testing.T) {
 	}
 	h.Require.Contains(h.Stderr.String(), want)
 	h.Require.Empty(api.Calls())
+
+	h.Require.Error(h.Execute("harness", "setup", "--harness", "opencode", "--dry-run"))
+	want = "opencode is not installed or not on PATH"
+	switch runtime.GOOS {
+	case "darwin":
+		want = "opencode is not installed or not on PATH or in OpenCode.app or ~/.opencode/bin"
+	case "linux":
+		want = "opencode is not installed or not on PATH or in /opt/OpenCode or ~/.opencode/bin"
+	}
+	h.Require.Contains(h.Stderr.String(), want)
+	h.Require.Empty(api.Calls())
+}
+
+func Test_Harness_Setup_OpenCodeDesktopWithoutCLI(t *testing.T) {
+	skipUnlessSupported(t)
+	binary := "/Applications/OpenCode.app/Contents/Resources/opencode-cli"
+	if runtime.GOOS == "linux" {
+		binary = "/opt/OpenCode/resources/opencode-cli"
+	}
+	h, _ := harnessAPI(t, "")
+	h.Context = internalcmd.WithExecer(h.Context, fakeHarnessExecer{binary: binary})
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	h.Require.NoError(h.Execute("harness", "setup", "--harness", "opencode", "--yes"))
+	settings := readHarnessSettings(t, "opencode", filepath.Join(dir, "opencode", "opencode.json"))
+	h.Require.Equal("baseten-harness/acme/primary", settings["model"])
+	h.Require.NoError(h.Execute("harness", "status", "--harness", "opencode", "--output", "json"))
+	var statuses public.HarnessStatusList
+	h.Require.NoError(json.Unmarshal(h.Stdout.Bytes(), &statuses))
+	h.Require.Len(statuses.Items, 1)
+	h.Require.True(statuses.Items[0].Installed)
+	h.Require.Equal("configured", statuses.Items[0].State)
+	h.Require.Equal([]public.HarnessInstall{{Kind: "Desktop", Binary: binary, Version: "1.2.3"}}, statuses.Items[0].Installs)
+	h.Require.NoError(h.Execute("harness", "status", "--harness", "opencode"))
+	h.Require.Contains(h.Stdout.String(), "Version           1.2.3\n")
+}
+
+func Test_Harness_Status_ListsEveryInstall(t *testing.T) {
+	skipUnlessSupported(t)
+	desktop := "/Applications/OpenCode.app/Contents/Resources/opencode-cli"
+	if runtime.GOOS == "linux" {
+		desktop = "/opt/OpenCode/resources/opencode-cli"
+	}
+	h, _ := fakeHarnessAPI(t)
+	h.Context = internalcmd.WithExecer(h.Context, versionedHarnessExecer{"opencode": "1.18.34", desktop: "opencode v2.0.27"})
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	h.Require.NoError(h.Execute("harness", "setup", "--harness", "opencode", "--yes"))
+	h.Require.NoError(h.Execute("harness", "status", "--harness", "opencode"))
+	h.Require.Contains(h.Stdout.String(), "Version           1.18.34 (CLI), 2.0.27 (Desktop)\n")
+	h.Require.NoError(h.Execute("harness", "status", "--harness", "opencode", "--output", "json"))
+	var statuses public.HarnessStatusList
+	h.Require.NoError(json.Unmarshal(h.Stdout.Bytes(), &statuses))
+	h.Require.Equal([]public.HarnessInstall{
+		{Kind: "CLI", Binary: "/fake/opencode", Version: "1.18.34"},
+		{Kind: "Desktop", Binary: desktop, Version: "opencode v2.0.27"},
+	}, statuses.Items[0].Installs)
+}
+
+func Test_Harness_Setup_OpenCodeFormatFollowsTheFile(t *testing.T) {
+	skipUnlessSupported(t)
+	h, _ := fakeHarnessAPI(t)
+	dir := t.TempDir()
+	path := harnessSettingsFile("opencode", dir)
+	h.Require.NoError(os.MkdirAll(dir, 0o700))
+	h.Require.NoError(os.WriteFile(path, []byte(`{"providers": {"other": {"name": "Other"}}}`), 0o600))
+	h.Require.NoError(h.Execute("harness", "setup", "--harness", "opencode", "--config-dir", dir, "--yes"))
+	settings := readHarnessSettings(t, "opencode", path)
+	h.Require.Contains(settings["providers"], "baseten-harness")
+	h.Require.NotContains(settings, "provider")
+	h.Require.NotContains(settings, "small_model")
+	h.Require.Equal("baseten-harness/deepseek-ai/DeepSeek-V4.1-Flash", settings["agents"].(map[string]any)["title"].(map[string]any)["model"])
+
+	h.Require.NoError(h.Execute("harness", "status", "--harness", "opencode", "--config-dir", dir, "--output", "json"))
+	var statuses public.HarnessStatusList
+	h.Require.NoError(json.Unmarshal(h.Stdout.Bytes(), &statuses))
+	h.Require.Equal("configured", statuses.Items[0].State)
+	h.Require.Equal("acme/primary", statuses.Items[0].DefaultRoute)
+	h.Require.Equal("deepseek-ai/DeepSeek-V4.1-Flash", statuses.Items[0].BackgroundRoute)
+	h.Require.NoError(h.Execute("harness", "status", "--harness", "opencode", "--config-dir", dir, "--verbose"))
+	h.Require.Contains(h.Stderr.String(), "providers.baseten-harness")
+	h.Require.Contains(h.Stderr.String(), "agents.title.model")
+	h.Require.NotContains(h.Stderr.String(), " provider.baseten-harness")
+
+	h.Require.NoError(h.Execute("harness", "teardown", "--harness", "opencode", "--config-dir", dir, "--yes"))
+	h.Require.Equal(map[string]any{"providers": map[string]any{"other": map[string]any{"name": "Other"}}}, readHarnessSettings(t, "opencode", path))
 }
 
 func Test_Harness_Setup_Teams(t *testing.T) {
@@ -806,18 +916,37 @@ func (g *harnessGateway) sentRequestClasses() []string {
 // Test_Harness_Setup_RealHarness configures each installed harness in an
 // isolated directory, runs it, and checks that it asks the gateway for the
 // configured route. Harnesses not on PATH are skipped.
+//
+// OpenCode 1 and 2 install the same `opencode` command, so the one on PATH is
+// taken for OpenCode 1 and OpenCode 2 is the binary named by
+// BASETEN_TEST_OPENCODE2, when set. OpenCode 2 reads both settings formats
+// and runs with each; OpenCode 1 reads only the original.
 func Test_Harness_Setup_RealHarness(t *testing.T) {
 	skipUnlessSupported(t)
-	for _, tc := range []struct {
-		name, binary string
-		args         []string
-	}{
-		{"claude-code", "claude", []string{"-p", "Reply with OK."}},
-		{"codex", "codex", []string{"exec", "--skip-git-repo-check", "Reply with OK."}},
-		{"opencode", "opencode", []string{"run", "Reply with OK."}},
-		{"pi", "pi", []string{"--print", "Reply with OK."}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	type harnessCase struct {
+		label, name, binary string
+		args                []string
+		// seed is a settings file in place before setup, which decides the
+		// OpenCode settings format.
+		seed string
+	}
+	cases := []harnessCase{
+		{label: "claude-code", name: "claude-code", binary: "claude", args: []string{"-p", "Reply with OK."}},
+		{label: "codex", name: "codex", binary: "codex", args: []string{"exec", "--skip-git-repo-check", "Reply with OK."}},
+		{label: "opencode/v1", name: "opencode", binary: "opencode", args: []string{"run", "Reply with OK."}},
+		{label: "pi", name: "pi", binary: "pi", args: []string{"--print", "Reply with OK."}},
+	}
+	if opencode2 := os.Getenv("BASETEN_TEST_OPENCODE2"); opencode2 != "" {
+		// OpenCode 2 runs a shared background server per user by default; a
+		// private one keeps the test off the developer's.
+		args := []string{"run", "--standalone", "Reply with OK."}
+		cases = append(cases,
+			harnessCase{label: "opencode2/v1", name: "opencode", binary: opencode2, args: args},
+			harnessCase{label: "opencode2/v2", name: "opencode", binary: opencode2, args: args, seed: `{"providers": {}}`},
+		)
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
 			binary, err := exec.LookPath(tc.binary)
 			if err != nil {
 				t.Skipf("%s is not on PATH", tc.binary)
@@ -833,6 +962,10 @@ func Test_Harness_Setup_RealHarness(t *testing.T) {
 				"opencode":    filepath.Join(root, ".config", "opencode"),
 				"pi":          filepath.Join(root, ".pi", "agent"),
 			}[tc.name]
+			if tc.seed != "" {
+				h.Require.NoError(os.MkdirAll(configDir, 0o700))
+				h.Require.NoError(os.WriteFile(harnessSettingsFile(tc.name, configDir), []byte(tc.seed), 0o600))
+			}
 			h.Require.NoError(h.Execute("harness", "setup", "--harness", tc.name, "--config-dir", configDir, "--yes"))
 
 			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)

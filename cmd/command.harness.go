@@ -12,7 +12,7 @@ const harnessPreRelease = "PRE-RELEASE: Harness commands are not GA yet and supp
 var commandHarness = Command{
 	Name:        "harness",
 	Summary:     "Configure Baseten harness integrations (PRE-RELEASE)",
-	Description: harnessPreRelease + "Configure Claude Code, Codex (CLI or ChatGPT desktop app), OpenCode CLI, and Pi to use Baseten routes.",
+	Description: harnessPreRelease + "Configure Claude Code, Codex (CLI or ChatGPT desktop app), OpenCode (CLI or desktop app), and Pi to use Baseten routes.",
 	Children: []Command{
 		{
 			Name:    "setup",
@@ -24,7 +24,8 @@ var commandHarness = Command{
 				"the Anthropic Messages API, and Codex lists the routes that serve the OpenAI Responses API. The first listed route is the default unless --route is set.\n\n" +
 				"Setup overwrites the harness's integration settings without saving their previous values. Running it again refreshes them. " +
 				"The routes API key is created on first setup and reused afterward. Restart the harness after setup. " +
-				"For Codex, setup also signs out of OpenAI/ChatGPT and disables ChatGPT login while the Baseten harness is configured, and restarts Codex's background server if one is running, asking first when Codex sessions are attached to it.",
+				"For Codex, setup also signs out of OpenAI/ChatGPT and disables ChatGPT login while the Baseten harness is configured, and restarts Codex's background server if one is running, asking first when Codex sessions are attached to it. " +
+				"For OpenCode, setup writes the original settings format, which OpenCode 1 and 2 both read, unless the file already has OpenCode 2's native settings, in which case it writes those.",
 			Flags: HarnessSetupFlags{},
 			Output: &CommandOutput[HarnessPlanList]{
 				TextDescription: "The created key and follow-up commands. Use --dry-run or --verbose for the configuration of each harness, and --verbose for setting names.",
@@ -55,7 +56,8 @@ var commandHarness = Command{
 			Name:    "status",
 			Summary: "Inspect local harness configuration (PRE-RELEASE)",
 			Description: harnessPreRelease +
-				"Show the installed version, configuration path, and configured routes of each harness. " +
+				"Show the installed versions, configuration path, and configured routes of each harness. " +
+				"A harness installed both as a CLI and as a desktop app lists both versions; they share one configuration file. " +
 				"Without --harness, shows every harness configured at its default path. Status reads local files only, " +
 				"so it works after the harness is uninstalled, but it doesn't check the key or live routes. Rerun setup to refresh routes.",
 			Flags: HarnessStatusFlags{},
@@ -181,17 +183,27 @@ type HarnessRoute struct {
 	DisplayName string `json:"display_name"`
 }
 
+// HarnessInstall is one copy of a harness found on this machine.
+type HarnessInstall struct {
+	// Kind is "CLI" or "Desktop".
+	Kind    string `json:"kind"`
+	Binary  string `json:"binary"`
+	Version string `json:"version"`
+}
+
 // HarnessStatus is the local integration state of one harness.
 type HarnessStatus struct {
-	Harness         string         `json:"harness"`
-	Config          string         `json:"config"`
-	Installed       bool           `json:"installed"`
-	Version         string         `json:"version"`
-	State           string         `json:"state"`
-	DefaultRoute    string         `json:"default_route,omitempty"`
-	BackgroundRoute string         `json:"background_route,omitempty"`
-	Routes          []HarnessRoute `json:"routes,omitempty"`
-	ManagedSettings []string       `json:"managed_settings,omitempty"`
+	Harness   string `json:"harness"`
+	Config    string `json:"config"`
+	Installed bool   `json:"installed"`
+	// Installs lists every copy of the harness found, the one on PATH first.
+	// They all share the configuration file at Config.
+	Installs        []HarnessInstall `json:"installs,omitempty"`
+	State           string           `json:"state"`
+	DefaultRoute    string           `json:"default_route,omitempty"`
+	BackgroundRoute string           `json:"background_route,omitempty"`
+	Routes          []HarnessRoute   `json:"routes,omitempty"`
+	ManagedSettings []string         `json:"managed_settings,omitempty"`
 }
 
 // HarnessStatusList is the JSON output of `baseten harness status`.
