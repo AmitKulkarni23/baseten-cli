@@ -97,6 +97,27 @@ var commandAuth = Command{
 				},
 			},
 		},
+		{
+			Name:        "list",
+			Summary:     "List stored profiles",
+			Description: "List stored profiles, marking the one currently in use.",
+			Flags:       AuthListFlags{},
+			Output: &CommandOutput[AuthListResult]{
+				TextDescription: "Table with columns: current marker (*), PROFILE, REMOTE (only when a profile uses " +
+					"a remote other than https://app.baseten.co), AUTH TYPE. When no profiles exist, prints " +
+					"\"No profiles found.\" to stderr.",
+				Examples: []CommandExample{
+					{
+						Description: "List all stored profiles.",
+						Command:     "baseten auth list",
+					},
+				},
+				JQExample: CommandExample{
+					Description: "Print just the profile names.",
+					Command:     "baseten auth list --jq '.profiles[].profile'",
+				},
+			},
+		},
 	},
 }
 
@@ -126,6 +147,19 @@ type AuthStatusResult struct {
 	AuthType  string `json:"auth_type"`
 }
 
+// AuthListResult is the JSON output of `baseten auth list`.
+type AuthListResult struct {
+	Profiles []AuthListProfile `json:"profiles"`
+}
+
+// AuthListProfile is a single stored profile in `baseten auth list` output.
+type AuthListProfile struct {
+	Profile   string `json:"profile"`
+	RemoteURL string `json:"remote_url"`
+	AuthType  string `json:"auth_type"`
+	Current   bool   `json:"current"`
+}
+
 // AuthLoginFlags are the flags for baseten auth login.
 type AuthLoginFlags struct {
 	CommandFlags
@@ -148,5 +182,10 @@ type AuthSwitchFlags struct {
 
 // AuthStatusFlags are the flags for baseten auth status.
 type AuthStatusFlags struct {
+	CommandFlags
+}
+
+// AuthListFlags are the flags for baseten auth list.
+type AuthListFlags struct {
 	CommandFlags
 }
