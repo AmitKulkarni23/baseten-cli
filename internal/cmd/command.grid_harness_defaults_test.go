@@ -2,13 +2,14 @@ package cmd_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	public "github.com/basetenlabs/baseten-cli/cmd"
 	"github.com/stretchr/testify/require"
 )
 
-func Test_Harness_HarnessDefaults_All(t *testing.T) {
+func Test_Grid_HarnessDefaults_All(t *testing.T) {
 	skipUnlessSupported(t)
 	h, api, _ := harnessDefaultsAPI(t, nil)
 	api.SetRoute("GET", harnessDefaultsPath, 200, harnessDefaultsBody(map[string]any{
@@ -28,15 +29,15 @@ func Test_Harness_HarnessDefaults_All(t *testing.T) {
 		},
 	}))
 
-	require.NoError(t, h.Execute("harness", "harness-defaults", "--output", "json"))
+	require.NoError(t, h.Execute("grid", "harness-defaults", "--output", "json"))
 
-	var out public.HarnessDefaultsList
+	var out public.GridHarnessDefaultsList
 	require.NoError(t, json.Unmarshal([]byte(h.Stdout.String()), &out))
 	require.Equal(t, "team-a", out.TeamId)
 	require.Equal(t, "Engineering", out.TeamName)
 	require.Len(t, out.Items, 4)
 
-	byHarness := map[string]public.HarnessDefault{}
+	byHarness := map[string]public.GridHarnessDefault{}
 	for _, item := range out.Items {
 		byHarness[item.Harness] = item
 	}
@@ -51,7 +52,7 @@ func Test_Harness_HarnessDefaults_All(t *testing.T) {
 	require.Nil(t, byHarness["pi"].Background)
 }
 
-func Test_Harness_HarnessDefaults_Filter(t *testing.T) {
+func Test_Grid_HarnessDefaults_Filter(t *testing.T) {
 	skipUnlessSupported(t)
 	h, api, _ := harnessDefaultsAPI(t, nil)
 	api.SetRoute("GET", harnessDefaultsPath, 200, harnessDefaultsBody(map[string]any{
@@ -63,9 +64,9 @@ func Test_Harness_HarnessDefaults_Filter(t *testing.T) {
 		},
 	}))
 
-	require.NoError(t, h.Execute("harness", "harness-defaults", "--harness", "codex", "--output", "json"))
+	require.NoError(t, h.Execute("grid", "harness-defaults", "--harness", "codex", "--output", "json"))
 
-	var out public.HarnessDefaultsList
+	var out public.GridHarnessDefaultsList
 	require.NoError(t, json.Unmarshal([]byte(h.Stdout.String()), &out))
 	require.Len(t, out.Items, 1)
 	require.Equal(t, "codex", out.Items[0].Harness)
@@ -73,7 +74,7 @@ func Test_Harness_HarnessDefaults_Filter(t *testing.T) {
 	require.Nil(t, out.Items[0].Background)
 }
 
-func Test_Harness_HarnessDefaults_Text(t *testing.T) {
+func Test_Grid_HarnessDefaults_Text(t *testing.T) {
 	skipUnlessSupported(t)
 	h, api, _ := harnessDefaultsAPI(t, nil)
 	api.SetRoute("GET", harnessDefaultsPath, 200, harnessDefaultsBody(map[string]any{
@@ -90,7 +91,7 @@ func Test_Harness_HarnessDefaults_Text(t *testing.T) {
 		"pi": map[string]any{},
 	}))
 
-	require.NoError(t, h.Execute("harness", "harness-defaults"))
+	require.NoError(t, h.Execute("grid", "harness-defaults"))
 	out := h.Stdout.String()
 
 	require.Contains(t, out, "claude-code")
@@ -100,4 +101,54 @@ func Test_Harness_HarnessDefaults_Text(t *testing.T) {
 	require.Contains(t, out, "acme/gpt (team)")
 	require.Contains(t, out, "n/a")
 	require.Contains(t, out, "-")
+}
+
+func Test_Grid_HarnessDefaults_UsesResolvedTeamSettingsEndpoint(t *testing.T) {
+	h, api, _ := harnessDefaultsAPI(t, nil)
+	h.Require.NoError(h.Execute("grid", "harness-defaults", "--output", "json"))
+	call := api.FindCall("GET", "/v1/grid/team_settings")
+	h.Require.NotNil(call)
+	h.Require.NotContains(call.Query(), "team_id")
+	h.Require.Nil(api.FindCall("GET", "/v1/teams"))
+	h.Require.Nil(api.FindCall("GET", "/v1/grid/settings/teams/team-a"))
+}
+
+func Test_Grid_HarnessDefaults_ExplicitTeam(t *testing.T) {
+	for _, team := range []string{"team-a", "Engineering"} {
+		t.Run(team, func(t *testing.T) {
+			h, api, _ := harnessDefaultsAPI(t, nil)
+			h.Require.NoError(h.Execute("grid", "harness-defaults", "--team", team, "--output", "json"))
+			h.Require.Equal("team-a", api.FindCall("GET", harnessDefaultsPath).Query().Get("team_id"))
+			var got public.GridHarnessDefaultsList
+			h.Require.NoError(json.Unmarshal(h.Stdout.Bytes(), &got))
+			h.Require.Equal("team-a", got.TeamId)
+			h.Require.Equal("Engineering", got.TeamName)
+		})
+	}
+}
+
+func Test_Grid_HarnessDefaults_ServerResolvesTeam(t *testing.T) {
+	h, api, _ := harnessDefaultsAPI(t, nil)
+	api.SetRoute("GET", "/v1/teams", 500, map[string]string{"message": "unavailable"})
+	body := harnessDefaultsBody(nil)
+	body["team_id"], body["team_name"] = "team-b", "Research"
+	api.SetRoute("GET", harnessDefaultsPath, 200, body)
+	h.Require.NoError(h.Execute("grid", "harness-defaults", "--output", "json"))
+	var got public.GridHarnessDefaultsList
+	h.Require.NoError(json.Unmarshal(h.Stdout.Bytes(), &got))
+	h.Require.Equal("team-b", got.TeamId)
+	h.Require.Equal("Research", got.TeamName)
+	h.Require.Len(api.Calls(), 1)
+}
+
+func Test_Grid_HarnessDefaults_ServerErrors(t *testing.T) {
+	for _, status := range []int{400, 403, 500} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			h, api, _ := harnessDefaultsAPI(t, nil)
+			api.SetRoute("GET", harnessDefaultsPath, status, map[string]string{"message": "server rejected team resolution"})
+			h.Require.Error(h.Execute("grid", "harness-defaults", "--output", "json"))
+			h.Require.Equal(status, decodeJSONErrorEnvelope(h).APIStatusCode)
+			h.Require.Len(api.Calls(), 1)
+		})
+	}
 }

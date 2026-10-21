@@ -14,48 +14,48 @@ import (
 )
 
 func init() {
-	Register("route usage", commandRouteUsage)
+	Register("grid route usage", commandGridRouteUsage)
 }
 
-// routesUsageMaxBuckets is the most daily buckets the endpoint returns per
+// gridUsageMaxBuckets is the most daily buckets the endpoint returns per
 // page.
-const routesUsageMaxBuckets = 31
+const gridUsageMaxBuckets = 31
 
-// routesUsageRetentionDays is how many days of usage, including today, the
+// gridUsageRetentionDays is how many days of usage, including today, the
 // endpoint keeps.
-const routesUsageRetentionDays = 92
+const gridUsageRetentionDays = 92
 
-func commandRouteUsage(ctx *CommandContext, f *cmd.RouteUsageFlags) error {
-	return runRoutesUsage(ctx, routesUsageRequest{
+func commandGridRouteUsage(ctx *CommandContext, f *cmd.GridRouteUsageFlags) error {
+	return runGridRouteUsage(ctx, gridUsageRequest{
+		team:    f.Team,
 		start:   f.Start,
 		end:     f.End,
 		since:   f.Since,
 		userIDs: f.UserIDs,
-		query:   f.RouteUsageQueryFlags,
+		query:   f.GridRouteUsageQueryFlags,
 		// Like the API: the previous UTC day through today.
 		defaultStart: func(end time.Time) time.Time { return end.AddDate(0, 0, -1) },
-		newTable: func(dims []managementapi.RouteUsageDimension) routesUsageTable {
-			return &routeUsageSeries{dims: dims, all: newRoutesUsageTotal()}
+		newTable: func(dims []managementapi.GridRouteUsageDimension) gridUsageTable {
+			return &gridRouteUsageSeries{dims: dims, all: newGridUsageTotal()}
 		},
 	})
 }
 
-// routesUsageRequest is one run of a routes usage command.
-type routesUsageRequest struct {
+// gridUsageRequest is one run of a routes usage command.
+type gridUsageRequest struct {
+	team       string
 	start, end time.Time
 	since      time.Duration
 	userIDs    []string
-	query      cmd.RouteUsageQueryFlags
+	query      cmd.GridRouteUsageQueryFlags
 	// defaultStart is the window start when --start and --since are omitted.
 	defaultStart func(end time.Time) time.Time
-	// defaultToCaller narrows usage to the caller when --user-id is omitted.
-	defaultToCaller bool
-	newTable        func(dims []managementapi.RouteUsageDimension) routesUsageTable
+	newTable     func(dims []managementapi.GridRouteUsageDimension) gridUsageTable
 }
 
-// routesUsageTable renders the text output from daily buckets.
-type routesUsageTable interface {
-	addBucket(managementapi.RoutesUsageBucket) error
+// gridUsageTable renders the text output from daily buckets.
+type gridUsageTable interface {
+	addBucket(managementapi.GridRouteUsageBucket) error
 	// empty reports whether no bucket had usage.
 	empty() bool
 	// unpriced reports whether any usage came back without a cost.
@@ -63,17 +63,17 @@ type routesUsageTable interface {
 	render(ctx *CommandContext)
 }
 
-func runRoutesUsage(ctx *CommandContext, req routesUsageRequest) error {
+func runGridRouteUsage(ctx *CommandContext, req gridUsageRequest) error {
 	q := req.query
 	if q.Limit < 0 {
 		return cmd.NewErrUsagef("--limit must be zero (no limit) or a positive number")
 	}
-	pageSize := cmp.Or(q.PageSize, routesUsageMaxBuckets)
-	if pageSize < 1 || pageSize > routesUsageMaxBuckets {
-		return cmd.NewErrUsagef("--page-size must be between 1 and %d", routesUsageMaxBuckets)
+	pageSize := cmp.Or(q.PageSize, gridUsageMaxBuckets)
+	if pageSize < 1 || pageSize > gridUsageMaxBuckets {
+		return cmd.NewErrUsagef("--page-size must be between 1 and %d", gridUsageMaxBuckets)
 	}
-	dims := routesUsageGroupBy(q.GroupBy)
-	startDate, endDate, err := routesUsageWindow(ctx, req)
+	dims := gridUsageGroupBy(q.GroupBy)
+	startDate, endDate, err := gridUsageWindow(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -83,26 +83,23 @@ func runRoutesUsage(ctx *CommandContext, req routesUsageRequest) error {
 		return err
 	}
 	api := cl.API()
-	userIDs := req.userIDs
-	if len(userIDs) == 0 && req.defaultToCaller {
-		me, err := api.GetUsersMe(ctx)
-		if err != nil {
-			return fmt.Errorf("getting current user: %w", err)
-		}
-		userIDs = []string{me.UserId}
+	team, err := gridTeamID(ctx, api, req.team)
+	if err != nil {
+		return err
 	}
-	params := managementapi.GetV1RoutesUsageParams{
+	params := managementapi.GetV1GridRoutesUsageParams{
+		TeamId:    team,
 		StartDate: &startDate,
 		EndDate:   &endDate,
 		GroupBy:   &dims,
 	}
-	if len(userIDs) > 0 {
-		params.UserIds = &userIDs
+	if len(req.userIDs) > 0 {
+		params.UserIds = &req.userIDs
 	}
 	if len(q.Models) > 0 {
 		params.Models = &q.Models
 	}
-	if providers := routesUsageProviders(q.Providers); len(providers) > 0 {
+	if providers := gridUsageProviders(q.Providers); len(providers) > 0 {
 		params.Providers = &providers
 	}
 
@@ -118,7 +115,7 @@ func runRoutesUsage(ctx *CommandContext, req routesUsageRequest) error {
 buckets:
 	for {
 		params.Limit = &pageSize
-		resp, err := api.GetRoutesUsage(ctx, params)
+		resp, err := api.GetGridRoutesUsage(ctx, params)
 		if err != nil {
 			return fmt.Errorf("getting routes usage: %w", err)
 		}
@@ -151,13 +148,6 @@ buckets:
 	}
 	if table.empty() {
 		ctx.LogLine("No usage in the selected window.")
-		// A team or workspace key authenticates as a service account, which
-		// never creates routes keys, so its own usage is always empty.
-		if req.defaultToCaller && len(req.userIDs) == 0 {
-			if session, err := ctx.authInfo.Session(); err == nil && session.UsesAPIKey() {
-				ctx.LogLine("If you're using a team or workspace API key, run 'baseten auth login' to see your own usage.")
-			}
-		}
 		return nil
 	}
 	names := make([]string, len(dims))
@@ -176,12 +166,12 @@ buckets:
 	return nil
 }
 
-// routesUsageGroupBy maps the --group-by values, already validated by the
+// gridUsageGroupBy maps the --group-by values, already validated by the
 // flag's enum, onto the backend dimension enum, dropping repeats.
-func routesUsageGroupBy(values []string) []managementapi.RouteUsageDimension {
-	dims := make([]managementapi.RouteUsageDimension, 0, len(values))
+func gridUsageGroupBy(values []string) []managementapi.GridRouteUsageDimension {
+	dims := make([]managementapi.GridRouteUsageDimension, 0, len(values))
 	for _, v := range values {
-		dim := managementapi.RouteUsageDimension(strings.ToUpper(v))
+		dim := managementapi.GridRouteUsageDimension(strings.ToUpper(v))
 		if !slices.Contains(dims, dim) {
 			dims = append(dims, dim)
 		}
@@ -189,19 +179,19 @@ func routesUsageGroupBy(values []string) []managementapi.RouteUsageDimension {
 	return dims
 }
 
-// routesUsageProviders maps the --provider values, already validated by the
+// gridUsageProviders maps the --provider values, already validated by the
 // flag's enum, onto the backend provider enum.
-func routesUsageProviders(values []string) []managementapi.RouteProvider {
-	providers := make([]managementapi.RouteProvider, 0, len(values))
+func gridUsageProviders(values []string) []managementapi.GridProvider {
+	providers := make([]managementapi.GridProvider, 0, len(values))
 	for _, v := range values {
-		providers = append(providers, managementapi.RouteProvider(strings.ToUpper(strings.ReplaceAll(v, "-", "_"))))
+		providers = append(providers, managementapi.GridProvider(strings.ToUpper(strings.ReplaceAll(v, "-", "_"))))
 	}
 	return providers
 }
 
-// routesUsageWindow resolves the query's UTC start and end dates, widened to
+// gridUsageWindow resolves the query's UTC start and end dates, widened to
 // whole days and clamped to retention.
-func routesUsageWindow(ctx *CommandContext, req routesUsageRequest) (startDate, endDate string, err error) {
+func gridUsageWindow(ctx *CommandContext, req gridUsageRequest) (startDate, endDate string, err error) {
 	start, end, err := usageWindow(ctx, req.start, req.end, req.since, req.defaultStart)
 	if err != nil {
 		return "", "", err
@@ -212,33 +202,33 @@ func routesUsageWindow(ctx *CommandContext, req routesUsageRequest) (startDate, 
 		endDay = endDay.AddDate(0, 0, 1)
 	}
 	today := ctx.Now().UTC().Truncate(24 * time.Hour)
-	if retained := today.AddDate(0, 0, 1-routesUsageRetentionDays); startDay.Before(retained) {
+	if retained := today.AddDate(0, 0, 1-gridUsageRetentionDays); startDay.Before(retained) {
 		if !endDay.After(retained) {
-			return "", "", cmd.NewErrUsagef("the window is older than the %d days of usage Baseten keeps", routesUsageRetentionDays)
+			return "", "", cmd.NewErrUsagef("the window is older than the %d days of usage Baseten keeps", gridUsageRetentionDays)
 		}
 		ctx.Logf("Usage is kept for %d days, so this only includes usage from %s on.\n",
-			routesUsageRetentionDays, retained.Format(time.DateOnly))
+			gridUsageRetentionDays, retained.Format(time.DateOnly))
 		startDay = retained
 	}
 	return startDay.Format(time.DateOnly), endDay.Format(time.DateOnly), nil
 }
 
-// routesUsageTotal sums usage, adding costs as exact decimals.
-type routesUsageTotal struct {
+// gridUsageTotal sums usage, adding costs as exact decimals.
+type gridUsageTotal struct {
 	input, cached, output int64
 	cost                  *big.Rat
 	// priced is false once any of the usage came back without a cost.
 	priced bool
 }
 
-func newRoutesUsageTotal() *routesUsageTotal {
-	return &routesUsageTotal{cost: new(big.Rat), priced: true}
+func newGridUsageTotal() *gridUsageTotal {
+	return &gridUsageTotal{cost: new(big.Rat), priced: true}
 }
 
-// routesUsageResultTotal converts one result, rejecting a cost that doesn't
+// gridUsageResultTotal converts one result, rejecting a cost that doesn't
 // parse.
-func routesUsageResultTotal(r managementapi.RoutesUsageResult) (*routesUsageTotal, error) {
-	t := newRoutesUsageTotal()
+func gridUsageResultTotal(r managementapi.GridRouteUsageResult) (*gridUsageTotal, error) {
+	t := newGridUsageTotal()
 	t.input = int64(r.InputTokens)
 	t.cached = int64(r.CachedInputTokens)
 	t.output = int64(r.OutputTokens)
@@ -252,7 +242,7 @@ func routesUsageResultTotal(r managementapi.RoutesUsageResult) (*routesUsageTota
 	return t, nil
 }
 
-func (t *routesUsageTotal) add(o *routesUsageTotal) {
+func (t *gridUsageTotal) add(o *gridUsageTotal) {
 	t.input += o.input
 	t.cached += o.cached
 	t.output += o.output
@@ -261,7 +251,7 @@ func (t *routesUsageTotal) add(o *routesUsageTotal) {
 }
 
 // cells renders the token counts and cost columns.
-func (t *routesUsageTotal) cells() []string {
+func (t *gridUsageTotal) cells() []string {
 	return []string{
 		billingGroupDigits(strconv.FormatInt(t.input, 10)),
 		billingGroupDigits(strconv.FormatInt(t.cached, 10)),
@@ -272,7 +262,7 @@ func (t *routesUsageTotal) cells() []string {
 
 // money renders the cost in dollars and cents, keeping tiny nonzero costs
 // visible, or "-" when some of it couldn't be priced.
-func (t *routesUsageTotal) money() string {
+func (t *gridUsageTotal) money() string {
 	if !t.priced {
 		return "-"
 	}
@@ -283,14 +273,18 @@ func (t *routesUsageTotal) money() string {
 	return billingFormatMoney(f)
 }
 
-func routesUsageDimensionCell(d managementapi.RouteUsageDimension, r managementapi.RoutesUsageResult) string {
+func gridUsageDimensionCell(d managementapi.GridRouteUsageDimension, r managementapi.GridRouteUsageResult) string {
 	var v string
 	switch d {
-	case managementapi.RouteUsageDimension_USER:
+	case managementapi.GridRouteUsageDimension_USER:
 		v = deref(r.UserId)
-	case managementapi.RouteUsageDimension_MODEL:
+	case managementapi.GridRouteUsageDimension_TEAM:
+		v = deref(r.TeamId)
+	case managementapi.GridRouteUsageDimension_ROUTER:
+		v = deref(r.RouterId)
+	case managementapi.GridRouteUsageDimension_MODEL:
 		v = deref(r.Model)
-	case managementapi.RouteUsageDimension_PROVIDER:
+	case managementapi.GridRouteUsageDimension_PROVIDER:
 		if r.Provider != nil {
 			v = strings.ToLower(strings.ReplaceAll(string(*r.Provider), "_", "-"))
 		}
@@ -298,9 +292,9 @@ func routesUsageDimensionCell(d managementapi.RouteUsageDimension, r managementa
 	return cmp.Or(v, "(unknown)")
 }
 
-// routesUsageHeaders are the table headers for the given leading columns and
+// gridUsageHeaders are the table headers for the given leading columns and
 // dimensions, with the numeric columns right-aligned.
-func routesUsageHeaders(leading []string, dims []managementapi.RouteUsageDimension) (headers []string, rightAligned []int) {
+func gridUsageHeaders(leading []string, dims []managementapi.GridRouteUsageDimension) (headers []string, rightAligned []int) {
 	headers = slices.Clone(leading)
 	for _, d := range dims {
 		headers = append(headers, string(d))
@@ -312,18 +306,18 @@ func routesUsageHeaders(leading []string, dims []managementapi.RouteUsageDimensi
 	return headers, rightAligned
 }
 
-// routeUsageSeries renders one row per day and --group-by combination, like
+// gridRouteUsageSeries renders one row per day and --group-by combination, like
 // model-api usage, with a trailing ALL row.
-type routeUsageSeries struct {
-	dims     []managementapi.RouteUsageDimension
+type gridRouteUsageSeries struct {
+	dims     []managementapi.GridRouteUsageDimension
 	rows     [][]string
 	dataRows int
-	all      *routesUsageTotal
+	all      *gridUsageTotal
 }
 
 // addBucket appends this day's rows. A day with no usage still gets a row so
 // gaps in the series stay visible.
-func (s *routeUsageSeries) addBucket(b managementapi.RoutesUsageBucket) error {
+func (s *gridRouteUsageSeries) addBucket(b managementapi.GridRouteUsageBucket) error {
 	stamp := b.Date
 	if len(b.Results) == 0 {
 		row := make([]string, 1+len(s.dims)+4)
@@ -333,13 +327,13 @@ func (s *routeUsageSeries) addBucket(b managementapi.RoutesUsageBucket) error {
 		return nil
 	}
 	for _, r := range b.Results {
-		t, err := routesUsageResultTotal(r)
+		t, err := gridUsageResultTotal(r)
 		if err != nil {
 			return err
 		}
 		row := []string{stamp}
 		for _, d := range s.dims {
-			row = append(row, routesUsageDimensionCell(d, r))
+			row = append(row, gridUsageDimensionCell(d, r))
 		}
 		s.rows = append(s.rows, append(row, t.cells()...))
 		s.dataRows++
@@ -350,11 +344,11 @@ func (s *routeUsageSeries) addBucket(b managementapi.RoutesUsageBucket) error {
 	return nil
 }
 
-func (s *routeUsageSeries) empty() bool    { return s.dataRows == 0 }
-func (s *routeUsageSeries) unpriced() bool { return !s.all.priced }
+func (s *gridRouteUsageSeries) empty() bool    { return s.dataRows == 0 }
+func (s *gridRouteUsageSeries) unpriced() bool { return !s.all.priced }
 
-func (s *routeUsageSeries) render(ctx *CommandContext) {
-	headers, rightAligned := routesUsageHeaders([]string{"DATE"}, s.dims)
+func (s *gridRouteUsageSeries) render(ctx *CommandContext) {
+	headers, rightAligned := gridUsageHeaders([]string{"DATE"}, s.dims)
 	rows := s.rows
 	// A totals row only earns its keep once there is more than one data row to
 	// total; with a single row it would just repeat it.
